@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>The Attic House - Walk & VR</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#bfdcf0;font:14px system-ui,sans-serif}
+#ov{position:fixed;inset:0;z-index:10;display:flex;align-items:center;justify-content:center;background:rgba(20,24,30,.55);color:#fff;cursor:pointer}
+#ov div{max-width:400px;padding:22px 28px;background:rgba(15,18,24,.88);border-radius:12px;line-height:1.6}
+#ov h1{margin:0 0 6px;font-size:22px}
+#hud{position:fixed;left:12px;top:12px;z-index:5;max-width:330px;color:#fff;background:rgba(0,0,0,.5);padding:8px 12px;border-radius:8px;line-height:1.5;font-size:12px}
+#snd{position:fixed;right:12px;top:12px;z-index:11;padding:8px 14px;border:0;border-radius:8px;background:#fff;cursor:pointer;font-weight:600}
+/* VR button wrapper sits ABOVE the overlay (z-index 10000 > 10). The three.js VRButton styles itself inline, so !important overrides it. */
+#vrwrap{position:fixed;z-index:10000;left:50%;bottom:24px;transform:translateX(-50%)}
+#vrwrap button{position:static!important;display:flex!important;align-items:center;gap:12px;width:auto!important;padding:14px 28px!important;font:700 18px system-ui!important;color:#fff!important;background:#ff3d71!important;border:0!important;border-radius:40px!important;opacity:1!important;box-shadow:0 6px 24px rgba(255,61,113,.55);cursor:pointer}
+#vrwrap button::before{content:"";width:36px;height:20px;background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 34 20'%3E%3Crect x='1' y='2' width='32' height='16' rx='6' fill='white'/%3E%3Ccircle cx='11' cy='10' r='4' fill='%23ff3d71'/%3E%3Ccircle cx='23' cy='10' r='4' fill='%23ff3d71'/%3E%3C/svg%3E") center/contain no-repeat}
+</style>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.164.1/examples/jsm/"}}</script>
+</head><body>
+<div id="ov"><div><h1>The Attic House</h1>Click to start. Climb the stairs to the top floor and find the attic.<br>Walk close to the glowing relic or the bottles in the fridge to inspect them.</div></div>
+<div id="hud"><b>Desktop:</b> WASD/arrows walk · mouse look (drag if no pointer lock) · Shift run · scroll zoom · F first/third person · E hold nearby object · M sound<br><b>VR:</b> left stick glide · right stick 30° turn · A/X sound · trigger grabs nearby object</div>
+<button id="snd">Sound: on</button><div id="vrwrap"></div>
+<script type="module">
+import * as THREE from 'three';
+import {VRButton} from 'three/addons/webxr/VRButton.js';
+
+/* ============ 1. RENDERER, SCENE, RIG ============ */
+const FH = 3.2;                                   // floor-to-floor height (metres)
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2)); renderer.setSize(innerWidth,innerHeight);
+renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap; // soft shadows
+renderer.toneMapping = THREE.ACESFilmicToneMapping;                                  // filmic, realistic contrast
+renderer.xr.enabled = true; renderer.xr.setReferenceSpaceType('local-floor');        // y=0 is the real floor in VR
+document.body.appendChild(renderer.domElement);
+document.getElementById('vrwrap').appendChild(VRButton.createButton(renderer));
+
+const SKY = 0xbfdcf0;
+const scene = new THREE.Scene(); scene.background = new THREE.Color(SKY);
+scene.fog = new THREE.Fog(SKY, 45, 170);          // distance fog: horizon fades into the sky
+const camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, .05, 300);
+// THE RIG: camera lives inside a group. We move/turn the rig, never the camera.
+// Desktop: camera is 1.6 m above the rig (eye height). VR: headset supplies height, so camera offset = 0.
+const rig = new THREE.Group(); rig.add(camera); scene.add(rig);
+
+/* ============ 2. LIGHTING ============ */
+scene.add(new THREE.HemisphereLight(0xdceeff, 0x8a7a60, 1.1));       // sky + ground bounce
+const sun = new THREE.DirectionalLight(0xfff1d6, 2.6); sun.position.set(25,40,18);
+sun.castShadow = true; sun.shadow.mapSize.set(2048,2048); sun.shadow.bias = -0.0004; sun.shadow.radius = 3;
+Object.assign(sun.shadow.camera,{left:-32,right:32,top:32,bottom:-32,near:1,far:120}); scene.add(sun);
+// A few shadow-less point lights brighten the interiors cheaply (the attic one is warm and dim).
+[[0,0,0xfff0dd,12,0],[1,0,0xfff0dd,12,0],[2,-6,0xffb060,10,-4]].forEach(([L,x,c,i,z])=>{
+  const p = new THREE.PointLight(c,i,16,2); p.position.set(x,L*FH+2.6,z); scene.add(p);});
+
+/* ============ 3. MATERIALS ============ */
+const M = (c,r=.8,m=0,o={}) => new THREE.MeshStandardMaterial({color:c,roughness:r,metalness:m,...o});
+function woodTexture(){ // plank texture drawn by code (no image file)
+  const c=document.createElement('canvas'); c.width=c.height=256; const g=c.getContext('2d');
+  for(let i=0;i<8;i++){ g.fillStyle=`hsl(28,${45+Math.random()*10}%,${38+Math.random()*10}%)`; g.fillRect(0,i*32,256,31);
+    g.fillStyle='rgba(0,0,0,.35)'; g.fillRect(0,i*32+31,256,1); g.fillRect(Math.random()*256,i*32,2,32); }
+  const t=new THREE.CanvasTexture(c); t.wrapS=t.wrapT=THREE.RepeatWrapping; t.colorSpace=THREE.SRGBColorSpace; t.anisotropy=4; return t; }
+const mat = {
+  wall:M(0xf6f4ef,.9), gable:M(0xf6f4ef,.9,0,{side:THREE.DoubleSide}), wood:M(0xffffff,.55,0,{map:woodTexture()}),
+  oak:M(0x8a5a35,.5), dark:M(0x2b2420,.7), attic:M(0x6b4a35,.9), roof:M(0x5b3a2e,.8), trunk:M(0x5a4030,1), leaf:M(0x4f8a3c,.9),
+  stair:M(0xb98a5a,.6), rail:M(0x3a2a20,.5), glass:M(0xaad4ee,.05,.1,{transparent:true,opacity:.28}),
+  grass:M(0x6f9a52,1), road:M(0x8d8f91,.95) };
+
+/* ============ 4. BUILDING HELPERS ============ */
+const solids = [];   // COLLISION LIST: {x0,x1,z0,z1,y0,y1} footprints of things you can't walk through
+// part(): add a box by CENTRE + SIZE to any parent (used inside factories, no collision)
+function part(p,x,y,z,w,h,d,m,uv){ const g=new THREE.BoxGeometry(w,h,d);
+  if(uv){ const a=g.attributes.uv; for(let i=8;i<12;i++) a.setXY(i,a.getX(i)*w/2,a.getY(i)*d/2); } // tile planks on top face
+  const o=new THREE.Mesh(g,m); o.position.set(x,y,z); o.castShadow=o.receiveShadow=true; p.add(o); return o; }
+// blk(): add a box by its WORLD CORNERS to the scene; solid=true also registers collision
+function blk(x0,y0,z0,x1,y1,z1,m,solid=true,uv){ const o=part(scene,(x0+x1)/2,(y0+y1)/2,(z0+z1)/2,x1-x0,y1-y0,z1-z0,m,uv);
+  if(solid) solids.push({x0,x1,z0,z1,y0,y1}); return o; }
+function cyl(p,x,y,z,rt,rb,h,m,seg=16){ const o=new THREE.Mesh(new THREE.CylinderGeometry(rt,rb,h,seg),m); o.position.set(x,y,z); o.castShadow=true; p.add(o); return o; }
+// place(): drop a factory-built group into the world and register ITS footprint (w x d x h, swapped if turned 90 degrees)
+function place(g,x,y,z,rot,w,d,h){ g.position.set(x,y,z); g.rotation.y=rot; scene.add(g);
+  const s=Math.abs(Math.sin(rot))>.7, hw=(s?d:w)/2, hd=(s?w:d)/2; solids.push({x0:x-hw,x1:x+hw,z0:z-hd,z1:z+hd,y0:y,y1:y+h}); return g; }
+// wall(): straight wall with openings. ops = [[centre,width,sillHeight,topHeight],...]. Windows get thin glass that blocks walking.
+function wall(ax,f,a0,a1,y,ops=[],m=mat.wall,H=3,t=.3){
+  const seg=(s,e,lo,hi,mm=m,tt=t)=>{ if(e-s<.01||hi-lo<.01) return;
+    return ax=='x' ? blk(s,y+lo,f-tt/2,e,y+hi,f+tt/2,mm) : blk(f-tt/2,y+lo,s,f+tt/2,y+hi,e,mm); };
+  let c=a0;
+  for(const [mid,w,sill,top] of [...ops].sort((p,q)=>p[0]-q[0])){ const s=mid-w/2,e=mid+w/2;
+    seg(c,s,0,H); seg(s,e,0,sill); seg(s,e,top,H);                 // wall before, below and above the opening
+    if(sill>0){ const g=seg(s,e,sill,top,mat.glass,.05); g.castShadow=false; }
+    c=e; }
+  seg(c,a1,0,H); }
+// slab(): floor plate. Wood top, not in collision list (we compute floor height separately).
+const slab=(x0,z0,x1,z1,L)=>blk(x0,L*FH-.2,z0,x1,L*FH,z1,mat.wood,false,true);
+// roof(): gabled roof (two tilted boards + two triangle gable ends). REUSED by the house and the bungalow.
+function roof(g,hs,len,y,a,m){ const w=hs/Math.cos(a), ty=Math.tan(a)*hs;
+  for(const s of [-1,1]){ const b=part(g,s*hs/2,y+ty/2+.12,0,w,.25,len,m); b.rotation.z=-s*a; }
+  const sh=new THREE.Shape([new THREE.Vector2(-hs,0),new THREE.Vector2(hs,0),new THREE.Vector2(0,ty)]);
+  for(const z of [-1,1]){ const t=new THREE.Mesh(new THREE.ShapeGeometry(sh),mat.gable); t.position.set(0,y,z*(len/2-.4)); g.add(t); } }
+
+/* ============ 5. FACTORIES: one function = one object type, call it many times ============ */
+const grp=()=>new THREE.Group();
+const sofa=(c=0x8b9a8f)=>{ const g=grp(),m=M(c,.95); part(g,0,.25,0,2.2,.5,.9,m); part(g,0,.7,-.35,2.2,.5,.2,m);
+  part(g,-1,.5,0,.2,.5,.9,m); part(g,1,.5,0,.2,.5,.9,m); for(const s of [-.5,.5]) part(g,s,.6,.05,.9,.2,.6,M(0xa8b5ab,1)); return g; };
+const table=(w=1.6,d=.9,h=.75)=>{ const g=grp(); part(g,0,h-.03,0,w,.06,d,mat.oak);
+  for(const a of [-1,1]) for(const b of [-1,1]) part(g,a*(w/2-.06),h/2,b*(d/2-.06),.06,h,.06,mat.oak); return g; };
+const chair=()=>{ const g=grp(); part(g,0,.45,0,.45,.05,.45,mat.oak); part(g,0,.75,-.2,.45,.55,.05,mat.oak);
+  for(const a of [-1,1]) for(const b of [-1,1]) part(g,a*.19,.22,b*.19,.04,.44,.04,mat.oak); return g; };
+const bed=(c=0xe9e6df)=>{ const g=grp(); part(g,0,.2,0,1.6,.4,2.1,mat.oak); part(g,0,.5,.05,1.5,.25,1.95,M(c,1));
+  part(g,0,.9,-1.05,1.7,1,.1,mat.oak); for(const s of [-.4,.4]) part(g,s,.68,-.75,.6,.12,.35,M(0xffffff,1)); part(g,0,.66,.35,1.5,.1,1.2,M(0x5b7a9a,1)); return g; };
+const sideTable=()=>{ const g=grp(); part(g,0,.25,0,.45,.5,.4,mat.oak); cyl(g,0,.57,0,.03,.03,.14,mat.dark);
+  cyl(g,0,.74,0,.1,.16,.2,M(0xfff0c0,.6,0,{emissive:0xffcc77,emissiveIntensity:.6})); return g; };
+const tvUnit=()=>{ const g=grp(); part(g,0,.25,0,1.6,.5,.45,mat.oak); part(g,0,.95,0,1.3,.75,.06,mat.dark); return g; };
+const crate=(s=.6)=>{ const g=grp(); part(g,0,s/2,0,s,s,s,M(0x9b7b52,.9)); part(g,0,s/2,0,s*1.02,.06,s*1.02,mat.dark); return g; };
+const tree=(s=1)=>{ const g=grp(); cyl(g,0,s,0,.18*s,.28*s,2*s,mat.trunk,8);
+  for(const [y,r] of [[2.6,1.3],[3.5,.95]]){ const o=new THREE.Mesh(new THREE.SphereGeometry(r*s,10,8),mat.leaf); o.position.y=y*s; o.castShadow=true; g.add(o); } return g; };
+const car=(c)=>{ const g=grp(); part(g,0,.55,0,1.8,.6,4.2,M(c,.3,.5)); part(g,0,1.1,-.2,1.6,.5,2.2,M(0x222a33,.2,.6));
+  for(const a of [-1,1]) for(const b of [-1,1]){ const w=cyl(g,a*.9,.35,b*1.4,.35,.35,.25,mat.dark); w.rotation.z=Math.PI/2; } return g; };
+const fridge=()=>{ const g=grp(),w=.9,d=.7,h=1.9,s=M(0xdfe3e6,.35,.6),i=M(0xcfe8f5,.5,0,{emissive:0x335566,emissiveIntensity:.5});
+  part(g,0,h/2,-d/2+.03,w,h,.06,s); for(const x of [-1,1]) part(g,x*(w/2-.03),h/2,0,.06,h,d,s);
+  part(g,0,h-.03,0,w,.06,d,s); part(g,0,.03,0,w,.06,d,s); for(const y of [.6,1.1,1.5]) part(g,0,y,0,w-.1,.03,d-.1,i);
+  const door=grp(); door.position.set(-w/2,0,d/2); door.rotation.y=-1.1; part(door,w/2,h/2,.03,w,h,.05,s); g.add(door); return g; }; // door swung open
+const bottle=()=>{ const g=grp(),m=M(0x9fd4f2,.1,0,{transparent:true,opacity:.75}); cyl(g,0,.12,0,.045,.045,.24,m);
+  cyl(g,0,.27,0,.02,.045,.07,m); cyl(g,0,.315,0,.022,.022,.03,M(0x1b6fd1)); return g; };
+const relic=()=>{ const g=grp(); cyl(g,0,.5,0,.22,.3,1,M(0x39322d,.6)); const orb=grp(); orb.position.y=1.4;
+  orb.add(new THREE.Mesh(new THREE.SphereGeometry(.16,24,16),M(0xffd36b,.2,.3,{emissive:0xffa733,emissiveIntensity:1.4})));
+  const ring=new THREE.Mesh(new THREE.TorusGeometry(.26,.015,8,32),M(0xc9a24a,.3,.9)); ring.rotation.x=1.2; orb.add(ring); g.add(orb); g.userData.orb=orb; return g; };
+const bungalow=()=>{ const g=grp(); part(g,0,1.5,0,9,3,7,mat.wall); roof(g,4.8,7.6,3,.35,mat.roof);
+  part(g,0,1.1,3.52,1.1,2.2,.06,mat.oak); for(const x of [-3,3]) part(g,x,1.6,3.52,1.6,1.1,.06,mat.glass);
+  part(g,0,.03,8.5,9,.06,9,mat.road);                                  // the parking space
+  [[-2,0xb23a3a],[2.2,0x2f5d8c]].forEach(([x,c])=>{ const k=car(c); k.position.set(x,0,8.5); g.add(k); }); return g; };
+
+/* ============ 6. THE WORLD ============ */
+const ground=new THREE.Mesh(new THREE.PlaneGeometry(400,400),mat.grass); ground.rotation.x=-Math.PI/2; ground.receiveShadow=true; scene.add(ground);
+part(scene,0,.015,30,5,.03,44,mat.road); part(scene,13,.015,33.5,26,.03,5,mat.road);   // driveway to the bungalow
+
+// --- House shell: loop over 3 floors, same wall recipe each time with different openings ---
+const win=m=>[m,2.4,.9,2.2];
+for(let L=0;L<3;L++){ const y=L*FH, top=L==2;
+  wall('x', 8,-10.15,10.15,y, L==0?[win(-6.5),[0,2,0,2.4],win(6.5)]:[win(-6.5),win(0),win(6.5)]);  // south, with front door on floor 0
+  wall('x',-8,-10.15,10.15,y, top?[win(4)]:[win(-6),win(0),win(6)]);                                 // north (attic side: 1 window only)
+  wall('z', 10,-8,8,y,[win(-5),win(0),win(5)]);                                                        // east
+  wall('z',-10,-8,8,y, top?[win(4)]:[win(-4),win(3)]); }                                               // west
+slab(-10.15,-8.15,10.15,8.15,0);                                              // ground floor
+slab(-10.15,-8.15,7,8.15,1); slab(7,-8.15,10.15,-1.5,1); slab(7,7,10.15,8.15,1); // floor 1 (stairwell hole x7-10, z-1.5..7)
+slab(-10.15,-8.15,7,8.15,2); slab(7,-1.5,10.15,8.15,2); slab(7,-8.15,10.15,-7);   // floor 2 (hole z-7..-1.5)
+slab(-10.15,-8.15,10.15,8.15,3);                                              // ceiling under roof
+roof(scene,10.6,17,3*FH,.5,mat.roof);
+
+// --- Two straight staircases stacked on the east side. Steps are visual only; walking height comes from groundY() below ---
+function stairs(zA,zB,y0,y1,n){ const dz=Math.abs(zB-zA)/n;
+  for(let i=0;i<n;i++){ const z=zA+(zB-zA)*(i+.5)/n, yy=y0+(y1-y0)*(i+1)/n; blk(7,yy-.15,z-dz/2,9.9,yy,z+dz/2,mat.stair,false); } }
+stairs(7,-1.5,0,FH,16); stairs(-1.5,-7,FH,2*FH,16);
+// Railings stop you stepping sideways off a stair onto the wrong height
+blk(6.85,3.0,-1.5,6.95,4.2,7,mat.rail); blk(7,3.0,7,10,4.2,7.1,mat.rail);                 // around stair-A hole (floor 1)
+blk(6.85,3.0,-5,6.95,7.2,-1.5,mat.rail); blk(6.85,3.0,-7,6.95,4.4,-5,mat.rail); blk(7,3.0,-7.1,10,4.4,-7,mat.rail);
+
+// FLOOR HEIGHT: on a stair zone we slope with the stair; elsewhere we snap to the nearest floor level.
+function groundY(x,z,y){ if(x>7&&x<10){
+    if(z<7&&z>-1.5&&y<3.3) return Math.max(0,(7-z)/8.5*FH);                       // stair A (ground -> floor 1)
+    if(z<-1.5&&z>-7&&y>3.1) return Math.min(2*FH,FH+(-1.5-z)/5.5*FH); }          // stair B (floor 1 -> 2)
+  return Math.round(y/FH)*FH; }
+
+// --- Ground floor: living + dining (loops place many chairs from one factory) ---
+part(scene,-5,.02,-2.5,3.6,.02,2.6,M(0x7a2f35,1));                                   // rug
+place(sofa(),-5,0,-5,0,2.2,.9,.9); place(sofa(0x6f7f95),-8.6,0,-2.5,Math.PI/2,2.2,.9,.9);
+place(table(1.1,.6,.4),-5,0,-2.5,0,1.1,.6,.4); place(tvUnit(),-5,0,1.5,Math.PI,1.6,.45,.5);
+place(table(2.2,1,.75),3,0,-3,0,2.2,1,.75);
+[[3,-1.8,Math.PI],[3,-4.2,0],[1.5,-3,Math.PI/2],[4.5,-3,-Math.PI/2]].forEach(([x,z,r])=>place(chair(),x,0,z,r,.5,.5,.9));
+// --- Floor 1: bedroom (north of partition) + lounge (south) ---
+wall('x',0,-10,6.85,FH,[[-5,1.4,0,2.3]]);
+place(bed(),-6,FH,-6.1,0,1.7,2.1,.9); place(sideTable(),-7.4,FH,-7.5,0,.45,.4,.5); place(sideTable(),-4.6,FH,-7.5,0,.45,.4,.5);
+place(sofa(0xa07a5a),-4,FH,.9,0,2.2,.9,.9); place(table(1.1,.6,.4),-4,FH,2.7,0,1.1,.6,.4);
+place(table(1.8,.8,.75),3,FH,5,0,1.8,.8,.75); place(chair(),3,FH,4,0,.5,.5,.9);
+// --- Floor 2: THE ATTIC (dark-wood room, west end) ---
+wall('z',-1.5,-8,0,2*FH,[],mat.attic); wall('x',0,-10.15,-1.5,2*FH,[[-5,1.3,0,2.3]],mat.attic);
+const A=2*FH;
+part(scene,-6,A+.02,-4,4,.02,3,M(0x3d2b4a,1));
+place(bed(0xd9d2c4),-8.75,A,-5.5,Math.PI/2,2.1,1.7,.9);                         // headboard on west wall
+place(sideTable(),-9.6,A,-6.9,0,.45,.4,.5); place(sideTable(),-9.6,A,-4.1,0,.45,.4,.5);
+const fr=place(fridge(),-3.8,A,-7.4,0,1,.8,1.9);
+const R=place(relic(),-6,A,-3.2,0,.6,.6,1);
+[[-2.4,-7.2,.7],[-2.3,-6.4,.5],[-9.3,-1.2,.6],[-8.5,-1,.45]].forEach(([x,z,s])=>place(crate(s),x,A,z,x*3,s,s,s)); // loop of crates
+// Open landing: sofa + table
+place(sofa(0x8b6f8f),2,A,6.6,Math.PI,2.2,.9,.9); place(table(1.1,.6,.4),2,A,4.6,0,1.1,.6,.4);
+
+// --- Outdoors: collidable yard trees (factory + loop), and plants inside ---
+[[-14,12],[14,12],[-15,-4],[15,-4],[-12,-14],[13,-14]].forEach(([x,z])=>place(tree(1),x,0,z,0,.6,.6,4));
+place(tree(.45),-9,0,6.5,0,.4,.4,2); place(tree(.45),5.5,0,6.8,0,.4,.4,2);
+// Background (cheap): bungalow + 70 INSTANCED pine trees = 2 draw calls, no collision
+const bg=bungalow(); bg.position.set(26,0,42); bg.rotation.y=Math.PI; scene.add(bg);
+const N=70, tr=new THREE.InstancedMesh(new THREE.CylinderGeometry(.25,.35,2,6),mat.trunk,N), cr=new THREE.InstancedMesh(new THREE.ConeGeometry(2,5,7),mat.leaf,N);
+let seed=7; const rnd=()=>(seed=seed*16807%2147483647)/2147483647, d=new THREE.Object3D();
+for(let i=0;i<N;i++){ let x,z; do{ x=(rnd()-.5)*180; z=(rnd()-.5)*180; }
+  while((Math.abs(x)<24&&Math.abs(z)<22)||(x>10&&x<40&&z>26&&z<52)||(Math.abs(x)<5&&z>0));
+  const s=.8+rnd()*1.2; d.scale.set(s,s,s); d.position.set(x,s,z); d.updateMatrix(); tr.setMatrixAt(i,d.matrix);
+  d.position.set(x,4.5*s,z); d.updateMatrix(); cr.setMatrixAt(i,d.matrix); }
+tr.castShadow=cr.castShadow=true; scene.add(tr,cr);
+
+/* ============ 7. INSPECT / GRAB ============ */
+// Only these small movable things lift & spin. They have NO collision of their own (their parent furniture does),
+// so moving them never leaves a ghost collider behind.
+const items=[]; let held=null;
+function inspect(o,lift){ items.push({o,p:o.parent,hp:o.position.clone(),hy:o.rotation.y,lift,k:0}); }
+inspect(R.userData.orb,.35);
+[-.25,0,.25].forEach(x=>{ const b=bottle(); b.position.set(x,1.115,0); fr.add(b); inspect(b,.1); });  // 3 bottles on the fridge's middle shelf
+const v=new THREE.Vector3(), head=new THREE.Vector3();
+function nearest(){ let best=null,bd=2.6; for(const it of items){ it.o.getWorldPosition(v); const dd=Math.hypot(v.x-hx,v.z-hz); if(dd<bd&&Math.abs(v.y-rig.position.y)<3){bd=dd;best=it;} } return best; }
+function grab(){ if(held){ release(); return; } const it=nearest(); if(!it) return; held=it; camera.attach(it.o); it.o.position.set(0,-.1,-.55); it.o.rotation.set(0,0,0); }
+function release(){ if(!held) return; held.p.add(held.o); held.o.position.copy(held.hp); held.o.rotation.set(0,held.hy,0); held.k=0; held=null; }
+
+/* ============ 8. AUDIO (Web Audio, no files) ============ */
+let ac,master,soundOn=true; const sndBtn=document.getElementById('snd');
+function startAudio(){ if(ac){ ac.resume(); return; }
+  ac=new AudioContext(); master=ac.createGain(); master.gain.value=.8; master.connect(ac.destination);
+  const nb=ac.createBuffer(1,ac.sampleRate*2,ac.sampleRate), nd=nb.getChannelData(0); for(let i=0;i<nd.length;i++) nd[i]=Math.random()*2-1;
+  const ns=ac.createBufferSource(); ns.buffer=nb; ns.loop=true; const lp=ac.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=420;
+  const ng=ac.createGain(); ng.gain.value=.05; ns.connect(lp); lp.connect(ng); ng.connect(master); ns.start();     // soft airy ambience
+  const lfo=ac.createOscillator(), lg=ac.createGain(); lfo.frequency.value=.1; lg.gain.value=150; lfo.connect(lg); lg.connect(lp.frequency); lfo.start(); // slow breathing
+  const mf=n=>440*2**((n-69)/12), chords=[[48,55,59,64],[45,52,57,60],[41,48,52,57],[43,50,55,59]]; // Cmaj7, Am7, Fmaj7, G
+  const padF=ac.createBiquadFilter(); padF.type='lowpass'; padF.frequency.value=900; padF.connect(master);
+  const note=(f,t,dur,vol,type,dest)=>{ const o=ac.createOscillator(),g=ac.createGain(); o.type=type; o.frequency.value=f;
+    g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(vol,t+dur*.3); g.gain.linearRampToValueAtTime(0,t+dur); o.connect(g); g.connect(dest); o.start(t); o.stop(t+dur+.1); };
+  const scale=[72,74,76,79,81,84]; let bar=0;                                  // C major pentatonic = always sounds pleasant
+  const sched=()=>{ const t=ac.currentTime+.1; chords[bar%4].forEach(n=>{ note(mf(n),t,8,.05,'triangle',padF); note(mf(n+12),t,8,.025,'sine',padF); });
+    for(let i=0;i<4;i++) if(Math.random()<.75) note(mf(scale[Math.random()*scale.length|0]),t+i*2+.5,1.8,.035,'sine',master); bar++; };
+  sched(); setInterval(sched,8000); }
+function toggleSound(){ if(!ac) startAudio(); soundOn=!soundOn; master.gain.setTargetAtTime(soundOn?.8:0,ac.currentTime,.1); sndBtn.textContent='Sound: '+(soundOn?'on':'off'); }
+sndBtn.onclick=e=>{ e.stopPropagation(); toggleSound(); };
+
+/* ============ 9. INPUT ============ */
+const keys={}; let yaw=0,pitch=0,third=false,xrOn=false,started=false,dragging=false,hx=0,hz=0;
+rig.position.set(0,0,13);                                                       // start on the lawn facing the front door
+const avatar=grp(); cyl(avatar,0,.8,0,.25,.25,1.2,M(0x3b6ea5)); avatar.add(Object.assign(new THREE.Mesh(new THREE.SphereGeometry(.2),M(0xe0b090)),{position:new THREE.Vector3(0,1.6,0)})); avatar.visible=false; rig.add(avatar);
+const ov=document.getElementById('ov');
+ov.onclick=()=>{ started=true; ov.style.display='none'; try{ renderer.domElement.requestPointerLock(); }catch(e){} startAudio(); };
+addEventListener('keydown',e=>{ keys[e.code]=true; if(e.code=='KeyF') third=!third; if(e.code=='KeyM') toggleSound(); if(e.code=='KeyE') grab(); });
+addEventListener('keyup',e=>keys[e.code]=false);
+renderer.domElement.addEventListener('mousedown',()=>dragging=true); addEventListener('mouseup',()=>dragging=false);
+addEventListener('mousemove',e=>{ if(xrOn||!started) return; if(document.pointerLockElement||dragging){ yaw-=e.movementX*.0025; pitch=Math.max(-1.4,Math.min(1.4,pitch-e.movementY*.0025)); } });
+addEventListener('wheel',e=>{ if(xrOn) return; camera.fov=Math.max(35,Math.min(90,camera.fov+e.deltaY*.03)); camera.updateProjectionMatrix(); },{passive:true});
+addEventListener('resize',()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); });
+for(let i=0;i<2;i++){ const c=renderer.xr.getController(i); c.add(new THREE.Mesh(new THREE.BoxGeometry(.04,.04,.12),M(0x222222)));
+  c.addEventListener('selectstart',()=>{ if(!held) grab(); }); c.addEventListener('selectend',release); rig.add(c); }   // trigger = hold, release = put back
+renderer.xr.addEventListener('sessionstart',()=>{ xrOn=true; started=true; ov.style.display='none'; document.getElementById('hud').style.display='none';
+  camera.position.set(0,0,0); camera.rotation.set(0,0,0); camera.fov=70; avatar.visible=false; try{ startAudio(); }catch(e){} });
+renderer.xr.addEventListener('sessionend',()=>{ xrOn=false; rig.rotation.y=yaw; });
+
+/* ============ 10. MOVEMENT + COLLISION ============ */
+const R_=.3, dzone=a=>Math.abs(a)<.15?0:a;
+const free=(x,z,y)=>{ for(const c of solids) if(y<c.y1-.05&&y+1.7>c.y0+.05&&x+R_>c.x0&&x-R_<c.x1&&z+R_>c.z0&&z-R_<c.z1) return false; return true; };
+let snapLatch=false,btnLatch=false;
+function snap(dir){ camera.getWorldPosition(head); const bx=head.x,bz=head.z; rig.rotation.y+=dir*Math.PI/6;
+  camera.getWorldPosition(head); rig.position.x+=bx-head.x; rig.position.z+=bz-head.z; }          // pivot around the HEAD, not the rig origin
+function step(dt){
+  let mx=0,mz=0,heading=yaw;
+  mz+=(keys.KeyW||keys.ArrowUp?1:0)-(keys.KeyS||keys.ArrowDown?1:0); mx+=(keys.KeyD||keys.ArrowRight?1:0)-(keys.KeyA||keys.ArrowLeft?1:0);
+  const sp=(keys.ShiftLeft||keys.ShiftRight)?6:3, sess=renderer.xr.getSession();
+  if(xrOn&&sess){ let b=false;
+    for(const s of sess.inputSources){ const gp=s.gamepad; if(!gp) continue;
+      if(s.handedness=='left'){ mx+=dzone(gp.axes[2]); mz-=dzone(gp.axes[3]); }                    // left stick: glide
+      if(s.handedness=='right'){ const x=gp.axes[2]; if(Math.abs(x)>.7&&!snapLatch){ snap(x>0?-1:1); snapLatch=true; } else if(Math.abs(x)<.3) snapLatch=false; } // right stick: 30 deg snap turn
+      if(gp.buttons[4]?.pressed||gp.buttons[5]?.pressed) b=true; }
+    if(b&&!btnLatch) toggleSound(); btnLatch=b;                                                    // face button: sound
+    camera.getWorldDirection(head); heading=Math.atan2(-head.x,-head.z); }                         // glide relative to where you look
+  const l=Math.hypot(mx,mz); if(l>1){ mx/=l; mz/=l; }
+  const dx=(-Math.sin(heading)*mz+Math.cos(heading)*mx)*sp*dt, dz=(-Math.cos(heading)*mz-Math.sin(heading)*mx)*sp*dt;
+  if(xrOn){ camera.getWorldPosition(head); hx=head.x; hz=head.z; } else { hx=rig.position.x; hz=rig.position.z; }
+  const py=rig.position.y;
+  if(free(hx+dx,hz,py)){ hx+=dx; rig.position.x+=dx; }                                            // axis-by-axis = sliding along walls
+  if(free(hx,hz+dz,py)){ hz+=dz; rig.position.z+=dz; }
+  rig.position.y=groundY(hx,hz,py);                                                                // rig sits ON the floor (VR adds head height)
+  if(!xrOn){ rig.rotation.y=yaw; camera.rotation.x=pitch; camera.position.set(0,third?2.4:1.6,third?3.5:0); avatar.visible=third; }
+  else if(held) held.o.rotation.y+=dt;
+  for(const it of items){ if(it===held) continue; it.o.getWorldPosition(v);
+    const near=Math.hypot(v.x-hx,v.z-hz)<2&&Math.abs(v.y-rig.position.y)<3;                      // walk close -> lift & spin
+    it.k+=((near?1:0)-it.k)*Math.min(1,dt*3); it.o.position.y=it.hp.y+it.k*it.lift; it.o.rotation.y+=dt*.9*it.k; }
+}
+const clock=new THREE.Clock();
+renderer.setAnimationLoop(()=>{ const dt=Math.min(clock.getDelta(),.05); if(started||xrOn) step(dt); renderer.render(scene,camera); });
+</script></body></html>
